@@ -1,9 +1,9 @@
 import type { Firestore } from 'firebase-admin/firestore';
-import type pg from 'pg';
+import type { Pool } from 'mysql2/promise';
 
 export interface HealthReport {
   status: 'ok' | 'degraded';
-  postgres: 'up' | 'down';
+  mysql: 'up' | 'down';
   firestore: 'up' | 'down';
 }
 
@@ -13,20 +13,20 @@ export interface HealthChecker {
 
 export class HealthService implements HealthChecker {
   constructor(
-    private readonly pool: pg.Pool,
+    private readonly pool: Pool,
     private readonly firestore: Firestore,
   ) {}
 
   async check(): Promise<HealthReport> {
-    const [postgres, firestore] = await Promise.all([this.pingPostgres(), this.pingFirestore()]);
+    const [mysql, firestore] = await Promise.all([this.pingMysql(), this.pingFirestore()]);
     return {
-      status: postgres === 'up' && firestore === 'up' ? 'ok' : 'degraded',
-      postgres,
+      status: mysql === 'up' && firestore === 'up' ? 'ok' : 'degraded',
+      mysql,
       firestore,
     };
   }
 
-  private async pingPostgres(): Promise<'up' | 'down'> {
+  private async pingMysql(): Promise<'up' | 'down'> {
     try {
       await withTimeout(this.pool.query('SELECT 1'), 2000);
       return 'up';

@@ -21,7 +21,7 @@ function deps(overrides: Partial<AppDeps> = {}): AppDeps {
     ],
   };
   return {
-    health: { check: async () => ({ status: 'ok', postgres: 'up', firestore: 'up' }) },
+    health: { check: async () => ({ status: 'ok', mysql: 'up', firestore: 'up' }) },
     users: {
       save: async () => {
         throw new Error('not stubbed');

@@ -1,84 +1,104 @@
-import { randomUUID } from 'node:crypto';
-import type pg from 'pg';
+import { createHash, randomUUID } from 'node:crypto';
+import type { PoolConnection, RowDataPacket } from 'mysql2/promise';
+import { execute, queryRows, type Db } from '../db/pool.js';
 import { AppError } from '../errors/AppError.js';
-import { mapPgError } from '../errors/pg.js';
+import { mapDbError } from '../errors/dbError.js';
 import type { ChatStore } from '../stores/chatStore.js';
 import type { Chat, ChatSummary, ChatType, Member, Role } from '../types.js';
 
-interface ChatMemberRow {
+interface ChatMemberRow extends RowDataPacket {
   id: string;
   type: string;
   title: string | null;
   direct_key: string | null;
   created_by: string;
-  created_at: Date;
-  updated_at: Date;
+  created_at: Date | string;
+  updated_at: Date | string;
   user_id: string;
   role: string;
-  joined_at: Date;
+  joined_at: Date | string;
 }
 
-interface SummaryRow {
+interface SummaryRow extends RowDataPacket {
   id: string;
   type: string;
   title: string | null;
-  created_at: Date;
-  updated_at: Date;
-  member_ids: string[];
+  created_at: Date | string;
+  updated_at: Date | string;
+  member_ids: string | null;
 }
 
-type Db = pg.Pool | pg.PoolClient;
+interface LockRow extends RowDataPacket {
+  acquired: number | null;
+}
 
-export class PgChatRepository implements ChatStore {
-  constructor(private readonly pool: pg.Pool) {}
+export class MysqlChatRepository implements ChatStore {
+  constructor(private readonly pool: Db) {}
 
   async createOrGetDirect(input: {
     directKey: string;
     createdBy: string;
     memberIds: [string, string];
   }): Promise<{ chat: Chat; created: boolean }> {
-    const client = await this.pool.connect();
+    const connection = await this.connection();
+    const lock = lockName(input.directKey);
+    let locked = false;
+    let started = false;
     try {
-      await client.query('BEGIN');
-      // Serialize creators of the same pair. hashtext is int4; the lock takes bigint.
-      await client.query('SELECT pg_advisory_xact_lock(hashtext($1)::bigint)', [input.directKey]);
+      const rows = await queryRows<LockRow>(connection, 'SELECT GET_LOCK(?, 10) AS acquired', [lock]);
+      if (rows[0]?.acquired !== 1) {
+        throw new AppError(503, 'CHAT_CREATE_BUSY', 'Could not lock the direct chat pair');
+      }
+      locked = true;
+      await connection.beginTransaction();
+      started = true;
 
-      const existing = await client.query<{ id: string }>(
-        'SELECT id FROM chats WHERE direct_key = $1',
+      const existing = await queryRows<RowDataPacket & { id: string }>(
+        connection,
+        'SELECT id FROM chats WHERE direct_key = ?',
         [input.directKey],
       );
-      const existingId = existing.rows[0]?.id;
+      const existingId = existing[0]?.id;
       if (existingId) {
-        const chat = await this.findByIdOn(client, existingId);
+        const chat = await this.findByIdOn(connection, existingId);
         if (!chat) {
           throw new AppError(500, 'CHAT_CREATE_FAILED', 'Direct chat could not be loaded');
         }
-        await client.query('COMMIT');
+        await connection.commit();
+        started = false;
         return { chat, created: false };
       }
 
       const id = randomUUID();
-      await client.query(
+      await execute(
+        connection,
         `INSERT INTO chats (id, type, title, direct_key, created_by)
-         VALUES ($1, 'direct', NULL, $2, $3)`,
+         VALUES (?, 'direct', NULL, ?, ?)`,
         [id, input.directKey, input.createdBy],
       );
-      await client.query(
+      await execute(
+        connection,
         `INSERT INTO chat_members (chat_id, user_id, role)
-         VALUES ($1, $2, 'member'), ($1, $3, 'member')`,
-        [id, input.memberIds[0], input.memberIds[1]],
+         VALUES (?, ?, 'member'), (?, ?, 'member')`,
+        [id, input.memberIds[0], id, input.memberIds[1]],
       );
-      const chat = await this.findByIdOn(client, id);
+      const chat = await this.findByIdOn(connection, id);
       if (!chat) {
         throw new AppError(500, 'CHAT_CREATE_FAILED', 'Direct chat could not be loaded');
       }
-      await client.query('COMMIT');
+      await connection.commit();
+      started = false;
       return { chat, created: true };
     } catch (err) {
-      await client.query('ROLLBACK');
-      throw mapPgError(err);
+      if (started) {
+        await connection.rollback();
+      }
+      throw mapDbError(err);
     } finally {
-      client.release();
+      if (locked) {
+        await connection.query('SELECT RELEASE_LOCK(?)', [lock]).catch(() => undefined);
+      }
+      connection.release();
     }
   }
 
@@ -90,38 +110,39 @@ export class PgChatRepository implements ChatStore {
     if (input.members.length === 0) {
       throw new AppError(400, 'VALIDATION_ERROR', 'A group needs at least one member');
     }
-    const client = await this.pool.connect();
+    const connection = await this.connection();
+    let started = false;
     try {
-      await client.query('BEGIN');
+      await connection.beginTransaction();
+      started = true;
       const id = randomUUID();
-      await client.query(
+      await execute(
+        connection,
         `INSERT INTO chats (id, type, title, direct_key, created_by)
-         VALUES ($1, 'group', $2, NULL, $3)`,
+         VALUES (?, 'group', ?, NULL, ?)`,
         [id, input.title, input.createdBy],
       );
-
-      const params: unknown[] = [];
-      const values = input.members.map((member, index) => {
-        const base = index * 3;
-        params.push(id, member.userId, member.role);
-        return `($${base + 1}, $${base + 2}, $${base + 3})`;
-      });
-      await client.query(
-        `INSERT INTO chat_members (chat_id, user_id, role) VALUES ${values.join(', ')}`,
+      const placeholders = input.members.map(() => '(?, ?, ?)').join(', ');
+      const params = input.members.flatMap((member) => [id, member.userId, member.role]);
+      await execute(
+        connection,
+        `INSERT INTO chat_members (chat_id, user_id, role) VALUES ${placeholders}`,
         params,
       );
-
-      const chat = await this.findByIdOn(client, id);
+      const chat = await this.findByIdOn(connection, id);
       if (!chat) {
         throw new AppError(500, 'CHAT_CREATE_FAILED', 'Group chat could not be loaded');
       }
-      await client.query('COMMIT');
+      await connection.commit();
+      started = false;
       return chat;
     } catch (err) {
-      await client.query('ROLLBACK');
-      throw mapPgError(err);
+      if (started) {
+        await connection.rollback();
+      }
+      throw mapDbError(err);
     } finally {
-      client.release();
+      connection.release();
     }
   }
 
@@ -129,111 +150,122 @@ export class PgChatRepository implements ChatStore {
     try {
       return await this.findByIdOn(this.pool, id);
     } catch (err) {
-      throw mapPgError(err);
+      throw mapDbError(err);
     }
   }
 
   async listForUser(userId: string): Promise<ChatSummary[]> {
     try {
-      const result = await this.pool.query<SummaryRow>(
+      const rows = await queryRows<SummaryRow>(
+        this.pool,
         `SELECT c.id, c.type, c.title, c.created_at, c.updated_at,
-                array_agg(m.user_id ORDER BY m.joined_at ASC, m.user_id ASC) AS member_ids
+                GROUP_CONCAT(m.user_id ORDER BY m.joined_at ASC, m.user_id ASC) AS member_ids
          FROM chats c
-         INNER JOIN chat_members me ON me.chat_id = c.id AND me.user_id = $1
+         INNER JOIN chat_members me ON me.chat_id = c.id AND me.user_id = ?
          INNER JOIN chat_members m ON m.chat_id = c.id
          GROUP BY c.id
          ORDER BY c.updated_at DESC, c.id DESC`,
         [userId],
       );
-      return result.rows.map((row) => ({
+      return rows.map((row) => ({
         id: row.id,
         type: asChatType(row.type),
         title: row.title,
-        createdAt: row.created_at.toISOString(),
-        updatedAt: row.updated_at.toISOString(),
-        memberIds: row.member_ids,
+        createdAt: toIso(row.created_at),
+        updatedAt: toIso(row.updated_at),
+        memberIds: row.member_ids ? row.member_ids.split(',') : [],
       }));
     } catch (err) {
-      throw mapPgError(err);
+      throw mapDbError(err);
     }
   }
 
   async addMember(chatId: string, userId: string, role: Role): Promise<'added' | 'exists'> {
     try {
-      const result = await this.pool.query(
+      const result = await execute(
+        this.pool,
         `INSERT INTO chat_members (chat_id, user_id, role)
-         VALUES ($1, $2, $3)
-         ON CONFLICT (chat_id, user_id) DO NOTHING
-         RETURNING user_id`,
+         VALUES (?, ?, ?)
+         ON DUPLICATE KEY UPDATE user_id = chat_members.user_id`,
         [chatId, userId, role],
       );
-      if ((result.rowCount ?? 0) > 0) {
+      if (result.affectedRows > 0) {
         await this.touch(chatId);
         return 'added';
       }
       return 'exists';
     } catch (err) {
-      throw mapPgError(err);
+      throw mapDbError(err);
     }
   }
 
   async removeMember(chatId: string, userId: string): Promise<void> {
     try {
-      const result = await this.pool.query(
-        'DELETE FROM chat_members WHERE chat_id = $1 AND user_id = $2',
+      const result = await execute(
+        this.pool,
+        'DELETE FROM chat_members WHERE chat_id = ? AND user_id = ?',
         [chatId, userId],
       );
-      if ((result.rowCount ?? 0) === 0) {
+      if (result.affectedRows === 0) {
         throw new AppError(404, 'MEMBER_NOT_FOUND', 'Chat member not found');
       }
       await this.touch(chatId);
     } catch (err) {
-      throw mapPgError(err);
+      throw mapDbError(err);
     }
   }
 
   async updateTitle(chatId: string, title: string): Promise<void> {
     try {
-      const result = await this.pool.query(
+      const result = await execute(
+        this.pool,
         `UPDATE chats
-         SET title = $2, updated_at = now()
-         WHERE id = $1 AND type = 'group'`,
-        [chatId, title],
+         SET title = ?, updated_at = UTC_TIMESTAMP(3)
+         WHERE id = ? AND type = 'group'`,
+        [title, chatId],
       );
-      if ((result.rowCount ?? 0) === 0) {
+      if (result.affectedRows === 0) {
         throw new AppError(404, 'CHAT_NOT_FOUND', 'Group chat not found');
       }
     } catch (err) {
-      throw mapPgError(err);
+      throw mapDbError(err);
     }
   }
 
   async touch(chatId: string): Promise<void> {
     try {
-      await this.pool.query('UPDATE chats SET updated_at = now() WHERE id = $1', [chatId]);
+      await execute(this.pool, 'UPDATE chats SET updated_at = UTC_TIMESTAMP(3) WHERE id = ?', [chatId]);
     } catch (err) {
-      throw mapPgError(err);
+      throw mapDbError(err);
     }
   }
 
+  private async connection(): Promise<PoolConnection> {
+    if (!isPool(this.pool)) {
+      throw new Error('MySQL pool is required for transactions');
+    }
+    return this.pool.getConnection();
+  }
+
   private async findByIdOn(db: Db, id: string): Promise<Chat | null> {
-    const result = await db.query<ChatMemberRow>(
+    const rows = await queryRows<ChatMemberRow>(
+      db,
       `SELECT c.id, c.type, c.title, c.direct_key, c.created_by, c.created_at, c.updated_at,
               m.user_id, m.role, m.joined_at
        FROM chats c
        INNER JOIN chat_members m ON m.chat_id = c.id
-       WHERE c.id = $1
+       WHERE c.id = ?
        ORDER BY m.joined_at ASC, m.user_id ASC`,
       [id],
     );
-    const first = result.rows[0];
+    const first = rows[0];
     if (!first) {
       return null;
     }
-    const members: Member[] = result.rows.map((row) => ({
+    const members: Member[] = rows.map((row) => ({
       userId: row.user_id,
       role: asRole(row.role),
-      joinedAt: row.joined_at.toISOString(),
+      joinedAt: toIso(row.joined_at),
     }));
     return {
       id: first.id,
@@ -241,11 +273,30 @@ export class PgChatRepository implements ChatStore {
       title: first.title,
       directKey: first.direct_key,
       createdBy: first.created_by,
-      createdAt: first.created_at.toISOString(),
-      updatedAt: first.updated_at.toISOString(),
+      createdAt: toIso(first.created_at),
+      updatedAt: toIso(first.updated_at),
       members,
     };
   }
+}
+
+function isPool(db: Db): db is Exclude<Db, PoolConnection> {
+  return 'getConnection' in db;
+}
+
+function lockName(directKey: string): string {
+  return createHash('sha256').update(directKey).digest('hex');
+}
+
+function toIso(value: Date | string): string {
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new AppError(500, 'INVALID_TIMESTAMP', 'Stored timestamp is invalid');
+  }
+  return parsed.toISOString();
 }
 
 function asChatType(value: string): ChatType {

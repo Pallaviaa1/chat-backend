@@ -2,13 +2,13 @@ openapi: 3.0.3
 info:
   title: Chat backend
   version: 1.0.0
-  description: Users and chats in PostgreSQL. Messages, read receipts, and last seen in Firestore.
+  description: Users and chats in MySQL. Messages, read receipts, and last seen in Firestore.
 servers:
   - url: http://localhost:3000
 paths:
   /health:
     get:
-      summary: Check PostgreSQL and Firestore
+      summary: Check MySQL and Firestore
       responses:
         '200':
           description: Both dependencies are reachable

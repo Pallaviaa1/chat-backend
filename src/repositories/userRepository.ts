@@ -1,64 +1,68 @@
-import type pg from 'pg';
-import { mapPgError } from '../errors/pg.js';
+import type { RowDataPacket } from 'mysql2/promise';
+import { mapDbError } from '../errors/dbError.js';
 import { placeholderDisplayName, uniqueIds } from '../domain/ids.js';
+import { execute, queryRows, type Db } from '../db/pool.js';
 import type { UserStore } from '../stores/userStore.js';
 import type { User } from '../types.js';
 
-interface UserRow {
+interface UserRow extends RowDataPacket {
   id: string;
   display_name: string;
   email: string | null;
-  created_at: Date;
-  updated_at: Date;
+  created_at: Date | string;
+  updated_at: Date | string;
 }
 
-export class PgUserRepository implements UserStore {
-  constructor(private readonly pool: pg.Pool) {}
+export class MysqlUserRepository implements UserStore {
+  constructor(private readonly pool: Db) {}
 
   async findById(id: string): Promise<User | null> {
     try {
-      const result = await this.pool.query<UserRow>('SELECT * FROM users WHERE id = $1', [id]);
-      const row = result.rows[0];
+      const rows = await queryRows<UserRow>(this.pool, 'SELECT * FROM users WHERE id = ?', [id]);
+      const row = rows[0];
       return row ? mapUser(row) : null;
     } catch (err) {
-      throw mapPgError(err);
+      throw mapDbError(err);
     }
   }
 
   async insert(input: { id: string; displayName: string; email: string | null }): Promise<User> {
     try {
-      const result = await this.pool.query<UserRow>(
+      await execute(
+        this.pool,
         `INSERT INTO users (id, display_name, email)
-         VALUES ($1, $2, $3)
-         RETURNING id, display_name, email, created_at, updated_at`,
+         VALUES (?, ?, ?)`,
         [input.id, input.displayName, input.email],
       );
-      const row = result.rows[0];
-      if (!row) {
+      const user = await this.findById(input.id);
+      if (!user) {
         throw new Error('Insert did not return a user');
       }
-      return mapUser(row);
+      return user;
     } catch (err) {
-      throw mapPgError(err);
+      throw mapDbError(err);
     }
   }
 
   async update(input: { id: string; displayName: string; email: string | null }): Promise<User> {
     try {
-      const result = await this.pool.query<UserRow>(
+      const result = await execute(
+        this.pool,
         `UPDATE users
-         SET display_name = $2, email = $3, updated_at = now()
-         WHERE id = $1
-         RETURNING id, display_name, email, created_at, updated_at`,
-        [input.id, input.displayName, input.email],
+         SET display_name = ?, email = ?, updated_at = UTC_TIMESTAMP(3)
+         WHERE id = ?`,
+        [input.displayName, input.email, input.id],
       );
-      const row = result.rows[0];
-      if (!row) {
+      if (result.affectedRows === 0) {
         throw new Error('Update did not return a user');
       }
-      return mapUser(row);
+      const user = await this.findById(input.id);
+      if (!user) {
+        throw new Error('Update did not return a user');
+      }
+      return user;
     } catch (err) {
-      throw mapPgError(err);
+      throw mapDbError(err);
     }
   }
 
@@ -67,15 +71,18 @@ export class PgUserRepository implements UserStore {
     if (unique.length === 0) {
       return;
     }
+    const placeholders = unique.map(() => '(?, ?)').join(', ');
+    const params = unique.flatMap((id) => [id, placeholderDisplayName(id)]);
     try {
-      await this.pool.query(
+      await execute(
+        this.pool,
         `INSERT INTO users (id, display_name)
-         SELECT * FROM UNNEST($1::text[], $2::text[]) AS seed(id, display_name)
-         ON CONFLICT (id) DO NOTHING`,
-        [unique, unique.map((id) => placeholderDisplayName(id))],
+         VALUES ${placeholders}
+         ON DUPLICATE KEY UPDATE id = users.id`,
+        params,
       );
     } catch (err) {
-      throw mapPgError(err);
+      throw mapDbError(err);
     }
   }
 }
@@ -85,7 +92,18 @@ function mapUser(row: UserRow): User {
     id: row.id,
     displayName: row.display_name,
     email: row.email,
-    createdAt: row.created_at.toISOString(),
-    updatedAt: row.updated_at.toISOString(),
+    createdAt: toIso(row.created_at),
+    updatedAt: toIso(row.updated_at),
   };
+}
+
+function toIso(value: Date | string): string {
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error('Stored timestamp is invalid');
+  }
+  return parsed.toISOString();
 }

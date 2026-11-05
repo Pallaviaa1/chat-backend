@@ -1,28 +1,29 @@
 services:
-  postgres:
-    image: postgres:16-alpine
+  mysql:
+    image: mysql:8.4
     environment:
-      POSTGRES_USER: chat
-      POSTGRES_PASSWORD: chat
-      POSTGRES_DB: chat
+      MYSQL_ROOT_PASSWORD: chat
+      MYSQL_DATABASE: chat
+      MYSQL_USER: chat
+      MYSQL_PASSWORD: chat
     ports:
-      - "5432:5432"
+      - "3306:3306"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U chat -d chat"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-pchat"]
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 20
     volumes:
-      - chat_pg:/var/lib/postgresql/data
+      - chat_mysql:/var/lib/mysql
 
   api:
     build: .
     depends_on:
-      postgres:
+      mysql:
         condition: service_healthy
     environment:
       PORT: "3000"
-      DATABASE_URL: postgresql://chat:chat@postgres:5432/chat
+      DATABASE_URL: mysql://chat:chat@mysql:3306/chat
       FIREBASE_PROJECT_ID: demo-chat
       FIRESTORE_EMULATOR_HOST: host.docker.internal:8080
       AUTO_MIGRATE: "true"
@@ -33,4 +34,4 @@ services:
       - "host.docker.internal:host-gateway"
 
 volumes:
-  chat_pg:
+  chat_mysql:

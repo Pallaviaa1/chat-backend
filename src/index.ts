@@ -4,9 +4,9 @@ import { migrate } from './db/migrate.js';
 import { createPool } from './db/pool.js';
 import { createFirestore } from './firebase/client.js';
 import { logger } from './lib/logger.js';
-import { PgChatRepository } from './repositories/chatRepository.js';
+import { MysqlChatRepository } from './repositories/chatRepository.js';
 import { FirestoreMessageRepository } from './repositories/messageRepository.js';
-import { PgUserRepository } from './repositories/userRepository.js';
+import { MysqlUserRepository } from './repositories/userRepository.js';
 import { ChatService } from './services/chatService.js';
 import { HealthService } from './services/healthService.js';
 import { MessageService } from './services/messageService.js';
@@ -22,8 +22,8 @@ async function main(): Promise<void> {
   }
 
   const firestore = createFirestore(env);
-  const userRepository = new PgUserRepository(pool);
-  const chatRepository = new PgChatRepository(pool);
+  const userRepository = new MysqlUserRepository(pool);
+  const chatRepository = new MysqlChatRepository(pool);
   const messageRepository = new FirestoreMessageRepository(firestore);
 
   const app = createApp({
@@ -43,7 +43,7 @@ async function main(): Promise<void> {
       pool
         .end()
         .catch((err: unknown) => {
-          logger.error({ err }, 'failed to close postgres pool');
+          logger.error({ err }, 'failed to close mysql pool');
         })
         .finally(() => {
           process.exit(0);

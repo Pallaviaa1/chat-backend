@@ -1,6 +1,6 @@
 # Chat backend
 
-Users and chat membership live in PostgreSQL. Messages, read receipts, and last-seen cursors live in Cloud Firestore. The HTTP API is Node.js and TypeScript in strict mode.
+Users and chat membership live in MySQL. Messages, read receipts, and last-seen cursors live in Cloud Firestore. The HTTP API is Node.js and TypeScript in strict mode.
 
 Direct chats are one conversation per pair of people. Creating the same pair again returns the existing chat. Group chats, message edit, and message delete are included.
 
@@ -9,12 +9,12 @@ Direct chats are one conversation per pair of people. Creating the same pair aga
 ```text
 src/routes          HTTP contract
 src/services        membership and message rules
-src/repositories    PostgreSQL and Firestore
+src/repositories    MySQL and Firestore
 src/stores          interfaces the services depend on
 migrations          relational schema
 ```
 
-PostgreSQL holds data that needs uniqueness and joins: a user, a chat, and who is in it. The direct-chat key is a unique column, so two concurrent creates of the same pair cannot insert two chats. An advisory lock covers the check-and-insert.
+MySQL holds data that needs uniqueness and joins: a user, a chat, and who is in it. The direct-chat key is a unique column, so two concurrent creates of the same pair cannot insert two chats. A named lock (`GET_LOCK`) covers the check-and-insert.
 
 Firestore holds the write-heavy timeline:
 
@@ -32,19 +32,19 @@ The API trusts the user id in the body because that is the contract in the task.
 
 ## Run it
 
-Requirements: Node.js 20+, PostgreSQL 14+, and either the Firestore emulator or a Firebase service account.
+Requirements: Node.js 20+, MySQL 8+, and either the Firestore emulator or a Firebase service account.
 
 ```bash
 cp .env.example .env
 npm install
-docker compose up postgres -d
+docker compose up mysql -d
 npm run emulators
 npm run dev
 ```
 
 `npm run dev` applies `migrations/` on startup. The emulator UI is at http://localhost:4000. The API listens on port 3000.
 
-Without Docker, point `DATABASE_URL` at any PostgreSQL database and run `npm run migrate`.
+Without Docker, point `DATABASE_URL` at any MySQL 8 database and run `npm run migrate`.
 
 To use a live Firebase project instead of the emulator, unset `FIRESTORE_EMULATOR_HOST` and set `FIREBASE_CLIENT_EMAIL` and `FIREBASE_PRIVATE_KEY`. If the emulator host is set, the process will not use the service account. That avoids writing to production from a laptop by mistake.
 
@@ -59,10 +59,10 @@ To use a live Firebase project instead of the emulator, unset `FIRESTORE_EMULATO
 | GET | `/chat/:chatId/messages?limit=50` | Newest page, chronological order |
 | POST | `/chat/:chatId/message/:messageId/read` | Mark a message read |
 | POST | `/chat/:chatId/lastseen` | Store the member's last seen message |
-| GET | `/user/:userId/chats` | Chats and member ids from PostgreSQL |
+| GET | `/user/:userId/chats` | Chats and member ids from MySQL |
 | POST | `/users` | Create or update a profile |
 | GET | `/users/:userId` | Read a profile |
-| GET | `/health` | PostgreSQL and Firestore checks |
+| GET | `/health` | MySQL and Firestore checks |
 | POST | `/chat/group` | Create a group |
 | PATCH | `/chat/:chatId` | Rename a group |
 | POST | `/chat/:chatId/members` | Add a group member |
@@ -116,7 +116,7 @@ npm run typecheck
 npm run build
 ```
 
-Service tests use in-memory stores, so they cover the chat rules without PostgreSQL or Firebase. Route tests cover the HTTP contract. The SQL statements themselves are not executed in CI.
+Service tests use in-memory stores, so they cover the chat rules without MySQL or Firebase. Route tests cover the HTTP contract. The SQL statements themselves are not executed in CI.
 
 ## Production follow-ups
 
