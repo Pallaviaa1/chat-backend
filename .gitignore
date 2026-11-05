@@ -1,0 +1,14 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+*.log
+.firebase/
+firestore-debug.log
+ui-debug.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+*.tsbuildinfo

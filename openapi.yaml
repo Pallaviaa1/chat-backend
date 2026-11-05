@@ -1,0 +1,403 @@
+openapi: 3.0.3
+info:
+  title: Chat backend
+  version: 1.0.0
+  description: Users and chats in PostgreSQL. Messages, read receipts, and last seen in Firestore.
+servers:
+  - url: http://localhost:3000
+paths:
+  /health:
+    get:
+      summary: Check PostgreSQL and Firestore
+      responses:
+        '200':
+          description: Both dependencies are reachable
+        '503':
+          description: One dependency is down
+  /users:
+    post:
+      summary: Create or update a user profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SaveUser'
+      responses:
+        '201':
+          description: Created
+        '200':
+          description: Updated
+  /users/{userId}:
+    get:
+      summary: Get a user
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+      responses:
+        '200':
+          description: Profile
+        '404':
+          description: User not found
+  /chat/create:
+    post:
+      summary: Create or get a direct chat
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [userAId, userBId]
+              properties:
+                userAId:
+                  type: string
+                userBId:
+                  type: string
+            example:
+              userAId: asha
+              userBId: vikram
+      responses:
+        '200':
+          description: Existing or newly created chat
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [chatId, created]
+                properties:
+                  chatId:
+                    type: string
+                    format: uuid
+                  created:
+                    type: boolean
+  /chat/group:
+    post:
+      summary: Create a group chat
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [creatorId, title]
+              properties:
+                creatorId:
+                  type: string
+                title:
+                  type: string
+                memberIds:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        '201':
+          description: Group created
+  /chat/{chatId}:
+    get:
+      summary: Get a chat and its members
+      parameters:
+        - $ref: '#/components/parameters/ChatId'
+      responses:
+        '200':
+          description: Chat
+        '404':
+          description: Chat not found
+    patch:
+      summary: Rename a group
+      parameters:
+        - $ref: '#/components/parameters/ChatId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [actorId, title]
+              properties:
+                actorId:
+                  type: string
+                title:
+                  type: string
+      responses:
+        '200':
+          description: Updated chat
+  /chat/{chatId}/members:
+    post:
+      summary: Add a group member
+      parameters:
+        - $ref: '#/components/parameters/ChatId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [actorId, userId]
+              properties:
+                actorId:
+                  type: string
+                userId:
+                  type: string
+      responses:
+        '201':
+          description: Member added
+        '200':
+          description: Member was already in the group
+  /chat/{chatId}/members/{userId}:
+    delete:
+      summary: Remove a group member
+      parameters:
+        - $ref: '#/components/parameters/ChatId'
+        - $ref: '#/components/parameters/UserId'
+        - in: query
+          name: actorId
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Removed
+  /chat/{chatId}/message/send:
+    post:
+      summary: Send a message
+      parameters:
+        - $ref: '#/components/parameters/ChatId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [senderId, text]
+              properties:
+                senderId:
+                  type: string
+                text:
+                  type: string
+            example:
+              senderId: asha
+              text: hello
+      responses:
+        '201':
+          description: Message stored in Firestore
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Message'
+  /chat/{chatId}/messages:
+    get:
+      summary: List messages ordered by timestamp
+      parameters:
+        - $ref: '#/components/parameters/ChatId'
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - in: query
+          name: before
+          description: Exclusive ISO-8601 cursor from nextCursor. Returns older messages.
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Chronological page of the newest messages
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [messages, nextCursor]
+                properties:
+                  messages:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Message'
+                  nextCursor:
+                    type: string
+                    nullable: true
+  /chat/{chatId}/message/{messageId}/read:
+    post:
+      summary: Mark a message read
+      parameters:
+        - $ref: '#/components/parameters/ChatId'
+        - $ref: '#/components/parameters/MessageId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [userId]
+              properties:
+                userId:
+                  type: string
+      responses:
+        '200':
+          description: Read receipt stored
+  /chat/{chatId}/message/{messageId}:
+    patch:
+      summary: Edit your own message
+      parameters:
+        - $ref: '#/components/parameters/ChatId'
+        - $ref: '#/components/parameters/MessageId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [senderId, text]
+              properties:
+                senderId:
+                  type: string
+                text:
+                  type: string
+      responses:
+        '200':
+          description: Updated message
+    delete:
+      summary: Soft-delete your own message
+      parameters:
+        - $ref: '#/components/parameters/ChatId'
+        - $ref: '#/components/parameters/MessageId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [senderId]
+              properties:
+                senderId:
+                  type: string
+      responses:
+        '200':
+          description: Message hidden, row retained
+  /chat/{chatId}/lastseen:
+    post:
+      summary: Update the last seen message for a member
+      parameters:
+        - $ref: '#/components/parameters/ChatId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [userId, messageId]
+              properties:
+                userId:
+                  type: string
+                messageId:
+                  type: string
+      responses:
+        '200':
+          description: Cursor stored
+    get:
+      summary: Read a member's last seen cursor
+      parameters:
+        - $ref: '#/components/parameters/ChatId'
+        - in: query
+          name: userId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Cursor
+        '404':
+          description: Not set
+  /user/{userId}/chats:
+    get:
+      summary: List chats for a user
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+      responses:
+        '200':
+          description: Chats with member ids
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [chats]
+                properties:
+                  chats:
+                    type: array
+                    items:
+                      type: object
+                      required: [chatId, type, memberIds]
+                      properties:
+                        chatId:
+                          type: string
+                        type:
+                          type: string
+                          enum: [direct, group]
+                        title:
+                          type: string
+                          nullable: true
+                        memberIds:
+                          type: array
+                          items:
+                            type: string
+components:
+  parameters:
+    ChatId:
+      in: path
+      name: chatId
+      required: true
+      schema:
+        type: string
+        format: uuid
+    UserId:
+      in: path
+      name: userId
+      required: true
+      schema:
+        type: string
+    MessageId:
+      in: path
+      name: messageId
+      required: true
+      schema:
+        type: string
+  schemas:
+    SaveUser:
+      type: object
+      required: [displayName]
+      properties:
+        id:
+          type: string
+        displayName:
+          type: string
+        email:
+          type: string
+          format: email
+    Message:
+      type: object
+      required: [messageId, chatId, senderId, createdAt, deleted, readBy]
+      properties:
+        messageId:
+          type: string
+        chatId:
+          type: string
+        senderId:
+          type: string
+        text:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        editedAt:
+          type: string
+          format: date-time
+          nullable: true
+        deleted:
+          type: boolean
+        readBy:
+          type: array
+          items:
+            type: string

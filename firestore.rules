@@ -1,0 +1,11 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // This service uses the Admin SDK, which bypasses rules.
+    // Clients do not read or write Firestore directly.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
